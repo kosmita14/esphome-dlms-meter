@@ -39,8 +39,10 @@ class DlmsMeter : public Component, public uart::UARTDevice {
   bool source_connected_{false};
   bool mqtt_connected_{false};
   bool discard_on_reconnect_{true};
-  uint8_t buffer_[MAX_FRAME_SIZE + 1];
+  uint8_t buffer_[MAX_FRAME_SIZE];
   size_t frame_size_{0};
+  size_t payload_marker_{MAX_FRAME_SIZE};
+  size_t expected_size_{0};
   bool collecting_{false};
   bool start_slash_{false};
   uint8_t input_[INPUT_BUFFER_SIZE];

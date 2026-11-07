@@ -55,7 +55,9 @@ dlms_meter:
 Tag wskazuje konkretną wersję komponentu. Bez tagu można użyć
 `github://kosmita14/esphome-dlms-meter`, ale zmiany domyślnej gałęzi będą wtedy
 wpływać na kolejne kompilacje. Edycje README na gałęzi `main` nie zmieniają
-już istniejącego taga.
+już istniejącego taga. Tag `v1.0.0` nadal używa poprzedniego składania ramek
+według kolejnego `/K`; opis składania według długości poniżej dotyczy zmian w
+kodzie na gałęzi rozwojowej, które wymagają opublikowania jako nowa wersja.
 
 Uzupełnij osobny, niewysyłany do repozytorium plik `secrets.yaml`:
 
@@ -108,11 +110,13 @@ opisanego profilu, a nie dowolnego licznika DLMS.
 
 Obecna implementacja:
 
-1. Zbiera bajty od znacznika `/K` do następnego `/K`, z limitem 32768 bajtów.
-   Znacznik może być podzielony pomiędzy odczyty. Ostatnia ramka oczekuje na
-   następny znacznik i nie jest publikowana natychmiast po nadejściu końca.
-2. W zebranych danych wyszukuje pierwszy ciąg `00 82`, odczytuje długość i
-   sprawdza, czy część szyfrowana mieści się w buforze.
+1. Wyszukuje początek `/K` i pierwszy ciąg `00 82`. Znaczniki i pole długości
+   mogą być podzielone między odczyty. Przed znalezieniem `00 82` kolejny `/K`
+   powoduje rozpoczęcie wyszukiwania od nowa.
+2. Odczytuje długość części szyfrowanej, sprawdza jej zakres i zbiera dokładnie
+   tyle bajtów, ile wskazuje długość. Cała ramka do końca tagu może mieć
+   maksymalnie 32768 bajtów. Wewnątrz części szyfrowanej `/K` jest zwykłymi
+   danymi. Gotowa ramka jest przetwarzana bez oczekiwania na następny początek.
 3. Odszyfrowuje AES-128-GCM z IV składającym się z 12 zer i AAD `SC + AK`.
    Odrzuca ramkę, gdy uwierzytelnienie tagu się nie powiedzie.
 4. Interpretuje odszyfrowany tekst OBIS i publikuje sensory.
@@ -122,9 +126,11 @@ Obecna implementacja:
 - Dokument pokazuje również nagłówek rozpoczynający się inaczej niż `/K`.
   Obecny komponent **nie rozpoznaje dowolnego nagłówka**, w szczególności nie
   obsługuje przedstawionego tam przykładu `/EGM` jako początku ramki.
-- Rozdzielanie po `/K` działa dla zaobserwowanego strumienia `/KFM`, ale
-  szyfrogram jest binarny i może przypadkowo zawierać ten ciąg. W takim
-  przypadku aktualna implementacja może podzielić ramkę w niewłaściwym miejscu.
+- Wyszukiwanie `00 82` zakłada, że ten ciąg oznacza początek pola długości,
+  nie część nagłówka. W przypadku utraty bajtów lub błędnej, ale mieszczącej
+  się w limicie długości komponent może zaczekać na brakujące bajty i odrzucić
+  część kolejnych danych przy nieudanym uwierzytelnieniu. Reset źródła lub
+  MQTT czyści niepełną ramkę.
 - SC jest używany w AAD, ale kod nie wymusza wartości `0x30`; FC nie jest
   weryfikowany ani używany do wyliczenia IV. Inne wartości FC nie są więc
   poprawnie obsługiwane. Tag GCM jest sprawdzany, natomiast CRC z końcówki
@@ -209,7 +215,21 @@ przypadku brak danych jest wykrywany przez timeout diody, nie przez stan kabla.
 - Zduplikowane lub stare encje: sprawdź retained konfiguracje na brokerze i
   to, czy numer licznika lub prefiks nie uległy zmianie.
 
-## Rozwój
+## Testy i rozwój
+
+Test hostowy używa kompilatora C++, nagłówków i biblioteki OpenSSL oraz
+ArduinoJson 7. Ścieżka powinna wskazywać katalog `src` ArduinoJson, np. z
+katalogu `managed_components/bblanchon__arduinojson/src` po kompilacji ESPHome:
+
+```sh
+ARDUINOJSON_INCLUDE=/sciezka/do/ArduinoJson/src sh tests/run.sh
+```
+
+Test obejmuje uwierzytelnione syntetyczne ramki z `/K` w szyfrogramie,
+podział w każdym miejscu ramki, ramki następujące po sobie, niepoprawne
+długości i tagi, limit rozmiaru oraz rozłączenie źródła i MQTT. Nie zastępuje
+testu na rzeczywistym liczniku ani nie potwierdza pełnej zgodności z każdym
+formatem Stoen.
 
 Po zmianie kodu i testach opublikuj nowy commit i nowy tag; nie nadpisuj
 istniejącego `v1.0.0`. Przykładowe polecenia:

@@ -20,7 +20,8 @@ void DlmsMeter::setup() {
 
 void DlmsMeter::dump_config() {
   ESP_LOGCONFIG(TAG, "UART source -> MQTT Home Assistant discovery");
-  ESP_LOGCONFIG(TAG, "  Frame start: /K; maximum frame size: %u bytes", static_cast<unsigned>(MAX_FRAME_SIZE));
+  ESP_LOGCONFIG(TAG, "  Frame start: /K; payload length framing; maximum frame size: %u bytes",
+                static_cast<unsigned>(MAX_FRAME_SIZE));
 }
 
 void DlmsMeter::reset_pipeline_() {
@@ -33,6 +34,8 @@ void DlmsMeter::reset_pipeline_() {
 
 void DlmsMeter::reset_frame_() {
   this->frame_size_ = 0;
+  this->payload_marker_ = MAX_FRAME_SIZE;
+  this->expected_size_ = 0;
   this->collecting_ = false;
   this->start_slash_ = false;
 }
@@ -92,37 +95,18 @@ void DlmsMeter::process_input_(size_t input_size) {
       continue;
     }
 
-    if (this->frame_size_ > 0 && this->buffer_[this->frame_size_ - 1] == '/' && byte == 'K') {
-      size_t length = this->frame_size_ - 1;
-      uint8_t *plaintext = nullptr;
-      size_t plaintext_length = 0;
-      if (!this->decrypt_frame_(length, plaintext, plaintext_length)) {
-        this->buffer_[0] = '/';
-        this->buffer_[1] = 'K';
-        this->frame_size_ = 2;
-        continue;
-      }
-      std::string json;
-      if (!parse_obis_json(plaintext, plaintext_length, json)) {
-        ESP_LOGW(TAG, "Cannot parse decrypted OBIS frame into JSON");
-        this->buffer_[0] = '/';
-        this->buffer_[1] = 'K';
-        this->frame_size_ = 2;
-        continue;
-      }
-      bool valid = this->sensors_.start(json);
+    if (this->payload_marker_ == MAX_FRAME_SIZE && this->frame_size_ > 0 &&
+        this->buffer_[this->frame_size_ - 1] == '/' && byte == 'K') {
+      ESP_LOGW(TAG, "Incomplete frame header; resynchronizing");
+      this->reset_frame_();
       this->buffer_[0] = '/';
       this->buffer_[1] = 'K';
       this->frame_size_ = 2;
-      if (!valid) {
-        ESP_LOGW(TAG, "Invalid meter identifier or sensor data; discarding frame");
-        continue;
-      }
-      return;
+      this->collecting_ = true;
+      continue;
     }
 
-    if (this->frame_size_ == MAX_FRAME_SIZE + 1 ||
-        (this->frame_size_ == MAX_FRAME_SIZE && byte != '/')) {
+    if (this->frame_size_ == MAX_FRAME_SIZE) {
       ESP_LOGW(TAG, "Frame exceeds %u bytes; discarding until next /K",
                static_cast<unsigned>(MAX_FRAME_SIZE));
       this->reset_frame_();
@@ -130,6 +114,44 @@ void DlmsMeter::process_input_(size_t input_size) {
       continue;
     }
     this->buffer_[this->frame_size_++] = byte;
+
+    if (this->payload_marker_ == MAX_FRAME_SIZE && this->frame_size_ >= 2 &&
+        this->buffer_[this->frame_size_ - 2] == 0 && byte == 0x82) {
+      this->payload_marker_ = this->frame_size_ - 2;
+    }
+    if (this->payload_marker_ != MAX_FRAME_SIZE && this->expected_size_ == 0 &&
+        this->frame_size_ >= this->payload_marker_ + 4) {
+      size_t payload_length = (static_cast<size_t>(this->buffer_[this->payload_marker_ + 2]) << 8) |
+                              this->buffer_[this->payload_marker_ + 3];
+      if (payload_length < 18 || payload_length > MAX_FRAME_SIZE - this->payload_marker_ - 4) {
+        ESP_LOGW(TAG, "Invalid source frame length; discarding frame");
+        this->reset_frame_();
+        this->start_slash_ = byte == '/';
+        continue;
+      }
+      this->expected_size_ = this->payload_marker_ + 4 + payload_length;
+    }
+    if (this->expected_size_ != 0 && this->frame_size_ == this->expected_size_) {
+      uint8_t *plaintext = nullptr;
+      size_t plaintext_length = 0;
+      if (!this->decrypt_frame_(this->frame_size_, plaintext, plaintext_length)) {
+        this->reset_frame_();
+        continue;
+      }
+      std::string json;
+      if (!parse_obis_json(plaintext, plaintext_length, json)) {
+        ESP_LOGW(TAG, "Cannot parse decrypted OBIS frame into JSON");
+        this->reset_frame_();
+        continue;
+      }
+      bool valid = this->sensors_.start(json);
+      this->reset_frame_();
+      if (!valid) {
+        ESP_LOGW(TAG, "Invalid meter identifier or sensor data; discarding frame");
+        continue;
+      }
+      return;
+    }
   }
   this->input_size_ = 0;
   this->input_offset_ = 0;
